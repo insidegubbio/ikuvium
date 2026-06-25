@@ -111,7 +111,7 @@ async function callGemini(apiKey, model, userPrompt, monuments, systemPromptTemp
     .trim()
 
   if (!text)
-    throw new Error("Risposta vuota da Gemini")
+    throw new Error("Risposta vuota da Gemini, riprova.")
 
   return text
 }
