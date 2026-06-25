@@ -1,13 +1,13 @@
-/**
- *  insidegubbio ai api based on workers
- */
+/*
+* insidegubbio ai api based on workers
+*/
 
-const ALLOWED_ORIGIN_PATTERN = /^https?:\/\/(([\w-]+\.)?insidegubbio\.com|([\w-]+\.)?insidegubbio\.framer\.ai)$/ // even dev url
+const ALLOWED_ORIGIN_PATTERN = /^https?:\/\/(([\w-]+\.)?insidegubbio\.com|([\w-]+\.)?insidegubbio\.framer\.ai)$/
 
 const MONUMENTS_ENDPOINT =
   "https://api.insidegubbio.com/v1/articles/elenco-monumenti"
 
-const DEFAULT_MODEL = "gemini-2.5-flash" // if no var is set
+const DEFAULT_MODEL = "gemini-2.5-flash"
 
 // cors
 function corsHeaders(origin) {
@@ -33,11 +33,18 @@ function jsonResponse(data, status = 200, origin = "") {
 }
 
 // fetch monuments
+// monuments cache in-memory
+let monumentsCache = null
+let monumentsCacheTime = 0
+const MONUMENTS_CACHE_TTL = 5 * 60 * 1000 // 5 min
+
 async function fetchMonuments() {
-  const res = await fetch(MONUMENTS_ENDPOINT, {
-    cf: { cacheTtl: 300, cacheEverything: true }, // clloudflare edge cache 5 min
-  })
-  if (!res.ok) return []
+  const now = Date.now()
+  if (monumentsCache && now - monumentsCacheTime < MONUMENTS_CACHE_TTL) {
+    return monumentsCache
+  }
+  const res = await fetch(MONUMENTS_ENDPOINT)
+  if (!res.ok) return monumentsCache || [] // fallback to stale on error
 
   const data = await res.json()
   const list = Array.isArray(data?.monumenti) ? data.monumenti : []
@@ -59,6 +66,8 @@ async function fetchMonuments() {
       },
     })
   }
+  monumentsCache = monuments
+  monumentsCacheTime = Date.now()
   return monuments
 }
 
@@ -119,9 +128,12 @@ async function callGemini(apiKey, model, userPrompt, monuments, systemPromptTemp
 
 // handler
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const origin = request.headers.get("Origin") || ""
     const url = new URL(request.url)
+
+    // warm monuments cache
+    ctx.waitUntil(fetchMonuments())
 
     // preflight
     if (request.method === "OPTIONS") {
@@ -131,7 +143,7 @@ export default {
     // itinerary route
     if (request.method === "POST" && url.pathname === "/api/v1/itinerary") {
 
-      // check origin
+      // origin check
       if (!ALLOWED_ORIGIN_PATTERN.test(origin)) {
         return jsonResponse({ error: "Origine non autorizzata" }, 403, origin)
       }
