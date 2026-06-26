@@ -283,52 +283,11 @@ export default {
 
       const model = env.GEMINI_MODEL || DEFAULT_MODEL
 
-      const wantsStream =
-        request.headers.get("Accept")?.includes("text/event-stream") ||
-        body?.stream === true
-
-      if (wantsStream) {
-        try {
-          return await streamGemini(apiKey, model, prompt, monuments, systemPromptTemplate, origin)
-        } catch (err) {
-          return jsonResponse({ error: err.message || "Errore Gemini" }, 502, origin)
-        }
-      }
-
-      // non-streaming
+      // always stream
       try {
-        const geminiRes = await withTimeout(
-          fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                contents: [{ role: "user", parts: [{ text: prompt }] }],
-                systemInstruction: {
-                  parts: [{ text: systemPromptTemplate.replace("{{MONUMENTS}}", buildMonumentsContext(monuments)) }],
-                },
-                generationConfig: { temperature: 0.4, maxOutputTokens: MAX_OUTPUT_TOKENS },
-              }),
-            }
-          ),
-          GEMINI_TIMEOUT,
-          "Gemini"
-        )
-
-        const data = await geminiRes.json()
-        if (!geminiRes.ok) {
-          throw new Error(data?.error?.message || `Gemini HTTP ${geminiRes.status}`)
-        }
-
-        const parts = data?.candidates?.[0]?.content?.parts || []
-        const raw = parts.map((p) => p.text || "").join("").trim()
-        if (!raw) throw new Error("Risposta vuota da Gemini")
-        const itinerary = raw.length > MAX_CHARS ? raw.slice(0, MAX_CHARS) : raw
-
-        return jsonResponse({ itinerary }, 200, origin)
+        return await streamGemini(apiKey, model, prompt, monuments, systemPromptTemplate, origin)
       } catch (err) {
-        return jsonResponse({ error: err.message || "Errore interno" }, 502, origin)
+        return jsonResponse({ error: err.message || "Errore Gemini" }, 502, origin)
       }
     }
 
