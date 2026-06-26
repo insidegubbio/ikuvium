@@ -135,7 +135,7 @@ async function streamGemini(apiKey, model, userPrompt, monuments, systemPromptTe
       body: JSON.stringify({
         contents: [{ role: "user", parts: [{ text: userPrompt }] }],
         systemInstruction: { parts: [{ text: systemInstruction }] },
-        generationConfig: { temperature: 0.4, maxOutputTokens: 5000 },
+        generationConfig: { temperature: 0.4, maxOutputTokens: 8000 },
       }),
     }),
     GEMINI_TIMEOUT,
