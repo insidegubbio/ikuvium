@@ -10,7 +10,6 @@ const MONUMENTS_ENDPOINT =
 
 const DEFAULT_MODEL = "gemini-2.5-flash"
 
-// fallback in-memory
 let memCache = null
 let memCacheTime = 0
 const MEM_TTL = 5 * 60 * 1000
@@ -18,8 +17,6 @@ const KV_TTL_SECONDS = 10 * 60
 const MONUMENTS_FETCH_TIMEOUT = 5000
 const GEMINI_TIMEOUT = 55000
 const MAX_OUTPUT_TOKENS = 4000
-// safety char cap
-const MAX_CHARS = 4500
 
 function corsHeaders(origin) {
   const allowed = ALLOWED_ORIGIN_PATTERN.test(origin || "")
@@ -139,6 +136,7 @@ async function streamGemini(apiKey, model, userPrompt, monuments, systemPromptTe
         contents: [{ role: "user", parts: [{ text: userPrompt }] }],
         systemInstruction: { parts: [{ text: systemInstruction }] },
         generationConfig: { temperature: 0.4, maxOutputTokens: MAX_OUTPUT_TOKENS },
+        thinkingConfig: { thinkingBudget: 0 },
       }),
     }),
     GEMINI_TIMEOUT,
@@ -160,44 +158,31 @@ async function streamGemini(apiKey, model, userPrompt, monuments, systemPromptTe
       const reader = geminiRes.body.getReader()
       const decoder = new TextDecoder()
       let buffer = ""
-      let totalChars = 0
+      let readerDone = false
 
-      while (true) {
+      while (!readerDone) {
         const { done, value } = await reader.read()
-        if (done) break
+        readerDone = done
+        if (value) buffer += decoder.decode(value, { stream: true })
 
-        buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split("\n")
-        buffer = lines.pop()
+        buffer = lines.pop() ?? ""
 
         for (const line of lines) {
           if (!line.startsWith("data:")) continue
           const json = line.slice(5).trim()
           if (!json || json === "[DONE]") continue
-
           try {
             const parsed = JSON.parse(json)
             const parts = parsed?.candidates?.[0]?.content?.parts || []
-            let text = parts.map((p) => p.text || "").join("")
-            if (!text) continue
-
-            if (totalChars + text.length > MAX_CHARS) {
-              text = text.slice(0, MAX_CHARS - totalChars)
-              totalChars = MAX_CHARS
+            const text = parts.map((p) => p.text || "").join("")
+            if (text) {
               await writer.write(
                 encoder.encode(`data: ${JSON.stringify({ chunk: text })}\n\n`)
               )
-              break
             }
-
-            totalChars += text.length
-            await writer.write(
-              encoder.encode(`data: ${JSON.stringify({ chunk: text })}\n\n`)
-            )
           } catch {}
         }
-
-        if (totalChars >= MAX_CHARS) break
       }
 
       await writer.write(encoder.encode("data: [DONE]\n\n"))
@@ -228,17 +213,14 @@ export default {
     const origin = request.headers.get("Origin") || ""
     const url = new URL(request.url)
 
-    // preflight
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders(origin) })
     }
 
-    // health check
     if (request.method === "GET" && url.pathname === "/api/v1/health") {
       return jsonResponse({ status: "ok" }, 200, origin)
     }
 
-    // itinerary
     if (request.method === "POST" && url.pathname === "/api/v1/itinerary") {
 
       if (!ALLOWED_ORIGIN_PATTERN.test(origin)) {
@@ -283,7 +265,6 @@ export default {
 
       const model = env.GEMINI_MODEL || DEFAULT_MODEL
 
-      // always stream
       try {
         return await streamGemini(apiKey, model, prompt, monuments, systemPromptTemplate, origin)
       } catch (err) {
