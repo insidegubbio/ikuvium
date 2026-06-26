@@ -16,8 +16,8 @@ let memCacheTime = 0
 const MEM_TTL = 5 * 60 * 1000
 const KV_TTL_SECONDS = 10 * 60
 const MONUMENTS_FETCH_TIMEOUT = 5000
-const GEMINI_TIMEOUT = 28000
-const MAX_OUTPUT_TOKENS = 8000
+const GEMINI_TIMEOUT = 55000
+const MAX_OUTPUT_TOKENS = 4000
 // safety char cap
 const MAX_CHARS = 4500
 
