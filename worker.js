@@ -17,6 +17,9 @@ const MEM_TTL = 5 * 60 * 1000
 const KV_TTL_SECONDS = 10 * 60
 const MONUMENTS_FETCH_TIMEOUT = 5000
 const GEMINI_TIMEOUT = 28000
+const MAX_OUTPUT_TOKENS = 8000
+// safety char cap
+const MAX_CHARS = 4500
 
 function corsHeaders(origin) {
   const allowed = ALLOWED_ORIGIN_PATTERN.test(origin || "")
@@ -135,7 +138,7 @@ async function streamGemini(apiKey, model, userPrompt, monuments, systemPromptTe
       body: JSON.stringify({
         contents: [{ role: "user", parts: [{ text: userPrompt }] }],
         systemInstruction: { parts: [{ text: systemInstruction }] },
-        generationConfig: { temperature: 0.4, maxOutputTokens: 8000 },
+        generationConfig: { temperature: 0.4, maxOutputTokens: MAX_OUTPUT_TOKENS },
       }),
     }),
     GEMINI_TIMEOUT,
@@ -157,6 +160,7 @@ async function streamGemini(apiKey, model, userPrompt, monuments, systemPromptTe
       const reader = geminiRes.body.getReader()
       const decoder = new TextDecoder()
       let buffer = ""
+      let totalChars = 0
 
       while (true) {
         const { done, value } = await reader.read()
@@ -174,15 +178,28 @@ async function streamGemini(apiKey, model, userPrompt, monuments, systemPromptTe
           try {
             const parsed = JSON.parse(json)
             const parts = parsed?.candidates?.[0]?.content?.parts || []
-            const text = parts.map((p) => p.text || "").join("")
-            if (text) {
+            let text = parts.map((p) => p.text || "").join("")
+            if (!text) continue
+
+            if (totalChars + text.length > MAX_CHARS) {
+              text = text.slice(0, MAX_CHARS - totalChars)
+              totalChars = MAX_CHARS
               await writer.write(
                 encoder.encode(`data: ${JSON.stringify({ chunk: text })}\n\n`)
               )
+              break
             }
+
+            totalChars += text.length
+            await writer.write(
+              encoder.encode(`data: ${JSON.stringify({ chunk: text })}\n\n`)
+            )
           } catch {}
         }
+
+        if (totalChars >= MAX_CHARS) break
       }
+
       await writer.write(encoder.encode("data: [DONE]\n\n"))
     } catch (err) {
       try {
@@ -291,7 +308,7 @@ export default {
                 systemInstruction: {
                   parts: [{ text: systemPromptTemplate.replace("{{MONUMENTS}}", buildMonumentsContext(monuments)) }],
                 },
-                generationConfig: { temperature: 0.4, maxOutputTokens: 5000 },
+                generationConfig: { temperature: 0.4, maxOutputTokens: MAX_OUTPUT_TOKENS },
               }),
             }
           ),
@@ -305,8 +322,9 @@ export default {
         }
 
         const parts = data?.candidates?.[0]?.content?.parts || []
-        const itinerary = parts.map((p) => p.text || "").join("").trim()
-        if (!itinerary) throw new Error("Risposta vuota da Gemini")
+        const raw = parts.map((p) => p.text || "").join("").trim()
+        if (!raw) throw new Error("Risposta vuota da Gemini")
+        const itinerary = raw.length > MAX_CHARS ? raw.slice(0, MAX_CHARS) : raw
 
         return jsonResponse({ itinerary }, 200, origin)
       } catch (err) {
