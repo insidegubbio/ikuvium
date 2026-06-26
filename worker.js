@@ -13,12 +13,11 @@ const DEFAULT_MODEL = "gemini-2.5-flash"
 // fallback in-memory
 let memCache = null
 let memCacheTime = 0
-const MEM_TTL = 5 * 60 * 1000       // 5 min
-const KV_TTL_SECONDS = 10 * 60      // 10 min on KV
-const MONUMENTS_FETCH_TIMEOUT = 5000 // 5 s
-const GEMINI_TIMEOUT = 28000         // 28 s 
+const MEM_TTL = 5 * 60 * 1000
+const KV_TTL_SECONDS = 10 * 60
+const MONUMENTS_FETCH_TIMEOUT = 5000
+const GEMINI_TIMEOUT = 28000
 
-// helpers
 function corsHeaders(origin) {
   const allowed = ALLOWED_ORIGIN_PATTERN.test(origin || "")
     ? origin
@@ -47,7 +46,6 @@ function withTimeout(promise, ms, label = "timeout") {
   ])
 }
 
-// fetch monuments
 function parseMonuments(data) {
   const list = Array.isArray(data?.monumenti) ? data.monumenti : []
   const seen = new Set()
@@ -69,10 +67,8 @@ function parseMonuments(data) {
 async function fetchMonuments(env) {
   const now = Date.now()
 
-  // 1. in memory (?)
   if (memCache && now - memCacheTime < MEM_TTL) return memCache
 
-  // 2. KV if there's config
   if (env.MONUMENTS_KV) {
     try {
       const raw = await env.MONUMENTS_KV.get("monuments")
@@ -84,11 +80,9 @@ async function fetchMonuments(env) {
           return parsed
         }
       }
-    } catch {
-    }
+    } catch {}
   }
 
-  // 3. fetch
   const res = await withTimeout(
     fetch(MONUMENTS_ENDPOINT),
     MONUMENTS_FETCH_TIMEOUT,
@@ -100,11 +94,9 @@ async function fetchMonuments(env) {
   const monuments = parseMonuments(data)
   if (!monuments.length) return memCache || []
 
-  // update cache
   memCache = monuments
   memCacheTime = now
 
-  // background update KV 
   if (env.MONUMENTS_KV) {
     env.MONUMENTS_KV.put("monuments", JSON.stringify(monuments), {
       expirationTtl: KV_TTL_SECONDS,
@@ -130,7 +122,6 @@ function buildMonumentsContext(monuments) {
     .join("\n")
 }
 
-// gemini call but it streams
 async function streamGemini(apiKey, model, userPrompt, monuments, systemPromptTemplate, origin) {
   const monumentsContext = buildMonumentsContext(monuments)
   const systemInstruction = systemPromptTemplate.replace("{{MONUMENTS}}", monumentsContext)
@@ -157,12 +148,10 @@ async function streamGemini(apiKey, model, userPrompt, monuments, systemPromptTe
     throw new Error(msg)
   }
 
-  // gemini sse to client sse
   const { readable, writable } = new TransformStream()
   const writer = writable.getWriter()
   const encoder = new TextEncoder()
 
-  // process stream
   ;(async () => {
     try {
       const reader = geminiRes.body.getReader()
@@ -187,19 +176,15 @@ async function streamGemini(apiKey, model, userPrompt, monuments, systemPromptTe
             const parts = parsed?.candidates?.[0]?.content?.parts || []
             const text = parts.map((p) => p.text || "").join("")
             if (text) {
-              // send chunk as sse
               await writer.write(
                 encoder.encode(`data: ${JSON.stringify({ chunk: text })}\n\n`)
               )
             }
-          } catch {
-          }
+          } catch {}
         }
       }
-      // final sign
       await writer.write(encoder.encode("data: [DONE]\n\n"))
     } catch (err) {
-      // send errors before closing
       try {
         await writer.write(
           encoder.encode(`data: ${JSON.stringify({ error: err.message })}\n\n`)
@@ -221,7 +206,6 @@ async function streamGemini(apiKey, model, userPrompt, monuments, systemPromptTe
   })
 }
 
-// handler
 export default {
   async fetch(request, env, ctx) {
     const origin = request.headers.get("Origin") || ""
@@ -247,14 +231,9 @@ export default {
       const apiKey = env.GEMINI_API_KEY
       const systemPromptTemplate = env.SYSTEM_PROMPT
       if (!apiKey || !systemPromptTemplate) {
-        return jsonResponse(
-          { error: "Configurazione server mancante" },
-          500,
-          origin
-        )
+        return jsonResponse({ error: "Configurazione server mancante" }, 500, origin)
       }
 
-      // parse things seamelessly
       let body, monuments
       try {
         ;[body, monuments] = await Promise.all([
@@ -262,7 +241,6 @@ export default {
           fetchMonuments(env),
         ])
       } catch (err) {
-        // errors
         if (err instanceof SyntaxError) {
           return jsonResponse({ error: "Body JSON non valido" }, 400, origin)
         }
@@ -288,7 +266,6 @@ export default {
 
       const model = env.GEMINI_MODEL || DEFAULT_MODEL
 
-      // check stream capability
       const wantsStream =
         request.headers.get("Accept")?.includes("text/event-stream") ||
         body?.stream === true
@@ -301,7 +278,7 @@ export default {
         }
       }
 
-      // non streaming mode
+      // non-streaming
       try {
         const geminiRes = await withTimeout(
           fetch(
@@ -336,10 +313,6 @@ export default {
         return jsonResponse({ error: err.message || "Errore interno" }, 502, origin)
       }
     }
-
-    // health check
-    if (request.method === "GET" && url.pathname === "/api/v1/health") {
-      return jsonResponse({ status: "ok" }, 200, origin)
 
     return jsonResponse({ error: "Not found" }, 404, origin)
   },
