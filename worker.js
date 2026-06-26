@@ -337,6 +337,10 @@ export default {
       }
     }
 
+    // health check
+    if (request.method === "GET" && url.pathname === "/api/v1/health") {
+      return jsonResponse({ status: "ok" }, 200, origin)
+
     return jsonResponse({ error: "Not found" }, 404, origin)
   },
 }
