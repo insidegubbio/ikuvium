@@ -55,7 +55,6 @@ function parseMonuments(data) {
     seen.add(m.nome)
     out.push({
       nome: m.nome,
-      percorso: m.percorso || "",
       valutazione: m.valutazione || "",
       visitabilita: m.visitabilita || "",
       coordinate: { lat: m.coordinate?.lat ?? 0, lng: m.coordinate?.lng ?? 0 },
