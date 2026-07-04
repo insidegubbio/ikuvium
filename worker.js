@@ -6,7 +6,7 @@ const ALLOWED_ORIGIN_PATTERN =
   /^https?:\/\/(([\w-]+\.)?insidegubbio\.com|([\w-]+\.)?insidegubbio\.framer\.ai)$/
 
 const MONUMENTS_ENDPOINT =
-  "https://api.insidegubbio.com/v1/articles/elenco-monumenti"
+  "https://console.insidegubbio.com/v1/articles/elenco-monumenti"
 
 const DEFAULT_MODEL = "gemini-2.5-flash"
 
