@@ -1,4 +1,4 @@
-# ai
+# ikuvium
 
 cloudflare worker che espone un endpoint di intelligenza artificiale per generare itinerari turistici tra i monumenti di gubbio. usa gemini via google ai studio e recupera i dati dei monumenti dall'api principale di insidegubbio.
 
