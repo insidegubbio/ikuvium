@@ -87,8 +87,11 @@ async function fetchMonuments(env) {
     MONUMENTS_FETCH_TIMEOUT,
     "Fetch monumenti"
   )
-  if (!res.ok) return memCache || []
 
+  if (!res.ok) {
+  console.error("Monumenti fetch failed:", res.status, (await res.text()).slice(0, 200))
+  return memCache || []
+  }
   const data = await res.json()
   const monuments = parseMonuments(data)
   if (!monuments.length) return memCache || []
