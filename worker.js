@@ -14,6 +14,7 @@ const KV_TTL_SECONDS = 10 * 60
 const MONUMENTS_FETCH_TIMEOUT = 5000
 const GEMINI_TIMEOUT = 55000
 const MAX_OUTPUT_TOKENS = 14000
+const THINKING_LEVEL = "low"
 
 function corsHeaders(origin) {
   const allowed = ALLOWED_ORIGIN_PATTERN.test(origin || "")
@@ -83,13 +84,13 @@ async function fetchMonuments(env) {
     env.MONUMENTI.fetch(new Request("https://console.insidegubbio.com/v2/articles/elenco-monumenti")),
     MONUMENTS_FETCH_TIMEOUT,
     "Fetch monumenti"
-  );
+  )
 
   if (!res.ok) {
-  console.error("Monumenti fetch failed:", res.status, (await res.text()).slice(0, 200))
-  return memCache || []
+    console.error("Monumenti fetch failed:", res.status, (await res.text()).slice(0, 200))
+    return memCache || []
   }
-  
+
   const data = await res.json()
   const monuments = parseMonuments(data)
   if (!monuments.length) return memCache || []
@@ -125,6 +126,11 @@ async function streamGemini(apiKey, model, userPrompt, monuments, systemPromptTe
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`
 
+  const isGemini3 = /^gemini-3/.test(model)
+  const thinkingConfig = isGemini3
+    ? { includeThoughts: true, thinkingLevel: THINKING_LEVEL }
+    : { includeThoughts: true, thinkingBudget: -1 }
+
   const geminiRes = await withTimeout(
     fetch(url, {
       method: "POST",
@@ -132,7 +138,11 @@ async function streamGemini(apiKey, model, userPrompt, monuments, systemPromptTe
       body: JSON.stringify({
         contents: [{ role: "user", parts: [{ text: userPrompt }] }],
         systemInstruction: { parts: [{ text: systemInstruction }] },
-        generationConfig: { temperature: 0.4, maxOutputTokens: MAX_OUTPUT_TOKENS },
+        generationConfig: {
+          temperature: 0.4,
+          maxOutputTokens: MAX_OUTPUT_TOKENS,
+          thinkingConfig,
+        },
       }),
     }),
     GEMINI_TIMEOUT,
@@ -182,11 +192,15 @@ async function streamGemini(apiKey, model, userPrompt, monuments, systemPromptTe
               )
             }
 
+            // Smista ogni part: se ha thought:true è un riepilogo del
+            // ragionamento (lo mandiamo come evento "thinking" separato),
+            // altrimenti è testo di risposta vero e proprio ("chunk").
             const parts = parsed?.candidates?.[0]?.content?.parts || []
-            const text = parts.map((p) => p.text || "").join("")
-            if (text) {
+            for (const p of parts) {
+              if (!p.text) continue
+              const payload = p.thought ? { thinking: p.text } : { chunk: p.text }
               await writer.write(
-                encoder.encode(`data: ${JSON.stringify({ chunk: text })}\n\n`)
+                encoder.encode(`data: ${JSON.stringify(payload)}\n\n`)
               )
             }
           } catch {}
