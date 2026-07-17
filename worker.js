@@ -5,9 +5,6 @@
 const ALLOWED_ORIGIN_PATTERN =
   /^https?:\/\/(([\w-]+\.)?insidegubbio\.com|([\w-]+\.)?insidegubbio\.framer\.ai)$/
 
-const MONUMENTS_ENDPOINT =
-  "https://console.insidegubbio.com/v2/articles/elenco-monumenti"
-
 const DEFAULT_MODEL = "gemini-2.5-flash"
 
 let memCache = null
@@ -83,15 +80,16 @@ async function fetchMonuments(env) {
   }
 
   const res = await withTimeout(
-    fetch(MONUMENTS_ENDPOINT),
+    env2.MONUMENTI.fetch(new Request("https://console.insidegubbio.com/v2/articles/elenco-monumenti")),
     MONUMENTS_FETCH_TIMEOUT,
     "Fetch monumenti"
-  )
+  );
 
   if (!res.ok) {
   console.error("Monumenti fetch failed:", res.status, (await res.text()).slice(0, 200))
   return memCache || []
   }
+  
   const data = await res.json()
   const monuments = parseMonuments(data)
   if (!monuments.length) return memCache || []
