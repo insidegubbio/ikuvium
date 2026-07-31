@@ -115,7 +115,7 @@ function buildMonumentsContext(monuments) {
       return true
     })
     .map((m, i) =>
-      `${i + 1}. ${m.nome} | coord: ${m.coordinate.lat.toFixed(4)},${m.coordinate.lng.toFixed(4)} | rilevanza: ${m.valutazione} | visitabilità: ${m.visitabilita}`
+      `${i + 1}. ${m.nome} | zona: ${m.zona || "centro_medio"} | coord: ${m.coordinate.lat.toFixed(4)},${m.coordinate.lng.toFixed(4)} | rilevanza: ${m.valutazione} | visitabilità: ${m.visitabilita}`
     )
     .join("\n")
 }
