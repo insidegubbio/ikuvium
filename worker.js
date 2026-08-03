@@ -374,14 +374,14 @@ export default {
       }
 
       if (wantsGpx) {
-        return new Response(data.gpx, {
-          status: 200,
-          headers: {
-            "Content-Type": "application/gpx+xml",
-            "Cache-Control": "public, max-age=3600",
-            ...corsHeaders(origin),
-          },
-        })
+          return new Response(data.gpx, {
+              status: 200,
+              headers: {
+                  "Content-Type": "application/gpx+xml",
+                  "Cache-Control": "public, max-age=3600",
+                  "Access-Control-Allow-Origin": "*",
+              },
+          })
       }
 
       return jsonResponse(
