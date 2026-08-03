@@ -359,10 +359,14 @@ export default {
       return jsonResponse({ status: "ok" }, 200, origin)
     }
 
-    if (request.method === "GET" && url.pathname.startsWith("/api/v1/route/")) {
+  if (request.method === "GET" && url.pathname.startsWith("/api/v1/route/")) {
       const parts = url.pathname.split("/").filter(Boolean)
-      const routeId = parts[3]
-      const wantsGpx = parts[4] === "gpx"
+      const lastSegment = parts[3]
+  
+      const wantsGpx = lastSegment.endsWith(".gpx") || parts[4] === "gpx"
+      const routeId = lastSegment.endsWith(".gpx") 
+          ? lastSegment.slice(0, -4) 
+          : lastSegment
 
       if (!routeId) {
         return jsonResponse({ error: "Id percorso mancante" }, 400, origin)
@@ -389,7 +393,7 @@ export default {
           id: data.id,
           title: data.title,
           description: data.description,
-          gpxUrl: `https://ikuvium.insidegubbio.com/api/v1/route/${data.id}/gpx`,
+          gpxUrl: `https://ikuvium.insidegubbio.com/api/v1/route/${data.id}.gpx`,
           sections: [
             {
               paragraphs: data.pois.map(p => `${p.index} ${p.name}`),
