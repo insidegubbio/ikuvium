@@ -1,7 +1,3 @@
-/*
- * insidegubbio ai api based on workers
- */
-
 const ALLOWED_ORIGIN_PATTERN =
   /^https?:\/\/(([\w-]+\.)?insidegubbio\.com|([\w-]+\.)?insidegubbio\.framer\.ai)$/
 
@@ -11,7 +7,9 @@ let memCache = null
 let memCacheTime = 0
 const MEM_TTL = 5 * 60 * 1000
 const KV_TTL_SECONDS = 10 * 60
+const ROUTE_TTL_SECONDS = 60 * 60 * 24 * 90
 const MONUMENTS_FETCH_TIMEOUT = 5000
+const GPX_FETCH_TIMEOUT = 20000
 const GEMINI_TIMEOUT = 55000
 const MAX_OUTPUT_TOKENS = 14000
 const THINKING_LEVEL = "low"
@@ -22,7 +20,7 @@ function corsHeaders(origin) {
     : "https://insidegubbio.com"
   return {
     "Access-Control-Allow-Origin": allowed,
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
     "Access-Control-Max-Age": "86400",
   }
@@ -44,6 +42,10 @@ function withTimeout(promise, ms, label = "timeout") {
   ])
 }
 
+function makeRouteId() {
+  return crypto.randomUUID().replace(/-/g, "").slice(0, 12)
+}
+
 function parseMonuments(data) {
   const list = Array.isArray(data?.monumenti) ? data.monumenti : []
   const seen = new Set()
@@ -55,6 +57,7 @@ function parseMonuments(data) {
       nome: m.nome,
       valutazione: m.valutazione || "",
       visitabilita: m.visitabilita || "",
+      link: m.link || m.url || "",
       coordinate: { lat: m.coordinate?.lat ?? 0, lng: m.coordinate?.lng ?? 0 },
     })
   }
@@ -115,12 +118,80 @@ function buildMonumentsContext(monuments) {
       return true
     })
     .map((m, i) =>
-      `${i + 1}. ${m.nome} | zona: ${m.zona || "centro_medio"} | coord: ${m.coordinate.lat.toFixed(4)},${m.coordinate.lng.toFixed(4)} | rilevanza: ${m.valutazione} | visitabilità: ${m.visitabilita}`
+      `${i + 1}. ${m.nome} | zona: ${m.zona || "centro_medio"} | coord: ${m.coordinate.lat.toFixed(4)},${m.coordinate.lng.toFixed(4)} | rilevanza: ${m.valutazione} | visitabilità: ${m.visitabilita} | link: ${m.link || "n/d"}`
     )
     .join("\n")
 }
 
-async function streamGemini(apiKey, model, userPrompt, monuments, systemPromptTemplate, origin) {
+function findMonumentByName(monuments, nome) {
+  const target = (nome || "").trim().toLowerCase()
+  return monuments.find(m => m.nome.trim().toLowerCase() === target) || null
+}
+
+async function generateRouteGpx(routeTitle, routeDescription, pois) {
+  const body = {
+    name: routeTitle,
+    description: routeDescription,
+    create_track: true,
+    routing: true,
+    profile: "foot",
+    color: "2C3229",
+    pois: pois.map((p, i) => ({
+      lat: p.lat,
+      lon: p.lon,
+      name: p.nome,
+      icon_url: `https://vassallo.insidegubbio.com/svg/pin/${i + 1}.svg`,
+      link: p.link || undefined,
+    })),
+  }
+
+  const res = await withTimeout(
+    fetch("https://condottiero.insidegubbio.com/api/gpx", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+    GPX_FETCH_TIMEOUT,
+    "Generazione gpx"
+  )
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "")
+    throw new Error(`Errore generazione gpx: ${res.status} ${text.slice(0, 200)}`)
+  }
+
+  return res.text()
+}
+
+async function saveRoute(env, routeId, data) {
+  if (!env.ROUTES_KV) return
+  await env.ROUTES_KV.put(`route:${routeId}`, JSON.stringify(data), {
+    expirationTtl: ROUTE_TTL_SECONDS,
+  })
+}
+
+async function loadRoute(env, routeId) {
+  if (!env.ROUTES_KV) return null
+  const raw = await env.ROUTES_KV.get(`route:${routeId}`)
+  if (!raw) return null
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return null
+  }
+}
+
+function extractJsonBlock(text) {
+  const match = text.match(/\{[\s\S]*\}/)
+  if (!match) return null
+  try {
+    return JSON.parse(match[0])
+  } catch {
+    return null
+  }
+}
+
+async function streamGemini(env, apiKey, model, userPrompt, monuments, systemPromptTemplate, origin) {
   const monumentsContext = buildMonumentsContext(monuments)
   const systemInstruction = systemPromptTemplate.replace("{{MONUMENTS}}", monumentsContext)
 
@@ -160,6 +231,7 @@ async function streamGemini(apiKey, model, userPrompt, monuments, systemPromptTe
   const encoder = new TextEncoder()
 
   ;(async () => {
+    let fullText = ""
     try {
       const reader = geminiRes.body.getReader()
       const decoder = new TextDecoder()
@@ -184,7 +256,6 @@ async function streamGemini(apiKey, model, userPrompt, monuments, systemPromptTe
           try {
             const parsed = JSON.parse(json)
 
-            // debug: segnala finishReason anomali
             const finishReason = parsed?.candidates?.[0]?.finishReason
             if (finishReason && finishReason !== "STOP") {
               await writer.write(
@@ -192,18 +263,63 @@ async function streamGemini(apiKey, model, userPrompt, monuments, systemPromptTe
               )
             }
 
-            // Smista ogni part: se ha thought:true è un riepilogo del
-            // ragionamento (lo mandiamo come evento "thinking" separato),
-            // altrimenti è testo di risposta vero e proprio ("chunk").
             const parts = parsed?.candidates?.[0]?.content?.parts || []
             for (const p of parts) {
               if (!p.text) continue
-              const payload = p.thought ? { thinking: p.text } : { chunk: p.text }
-              await writer.write(
-                encoder.encode(`data: ${JSON.stringify(payload)}\n\n`)
-              )
+              if (p.thought) {
+                await writer.write(encoder.encode(`data: ${JSON.stringify({ thinking: p.text })}\n\n`))
+              } else {
+                fullText += p.text
+                await writer.write(encoder.encode(`data: ${JSON.stringify({ chunk: fullText })}\n\n`))
+              }
             }
           } catch {}
+        }
+      }
+
+      const structured = extractJsonBlock(fullText)
+      if (structured?.pois?.length) {
+        try {
+          const monuments = await fetchMonuments(env)
+          const resolvedPois = structured.pois
+            .map(p => {
+              const m = findMonumentByName(monuments, p.nome || p.name)
+              if (!m) return null
+              return { nome: m.nome, lat: m.coordinate.lat, lon: m.coordinate.lng, link: m.link }
+            })
+            .filter(Boolean)
+
+          if (resolvedPois.length >= 2) {
+            const routeId = makeRouteId()
+            const gpxText = await generateRouteGpx(
+              structured.title || "Percorso Gubbio",
+              structured.description || "",
+              resolvedPois
+            )
+
+            await saveRoute(env, routeId, {
+              id: routeId,
+              title: structured.title || "Percorso Gubbio",
+              description: structured.description || "",
+              gpx: gpxText,
+              pois: resolvedPois.map((p, i) => ({
+                index: i + 1,
+                name: p.nome,
+                link: p.link,
+                lat: p.lat,
+                lon: p.lon,
+              })),
+              createdAt: Date.now(),
+            })
+
+            await writer.write(
+              encoder.encode(`data: ${JSON.stringify({ routeReady: true, routeId })}\n\n`)
+            )
+          }
+        } catch (err) {
+          await writer.write(
+            encoder.encode(`data: ${JSON.stringify({ error: `Generazione percorso fallita: ${err.message}` })}\n\n`)
+          )
         }
       }
 
@@ -241,6 +357,48 @@ export default {
 
     if (request.method === "GET" && url.pathname === "/api/v1/health") {
       return jsonResponse({ status: "ok" }, 200, origin)
+    }
+
+    if (request.method === "GET" && url.pathname.startsWith("/api/v1/route/")) {
+      const parts = url.pathname.split("/").filter(Boolean)
+      const routeId = parts[3]
+      const wantsGpx = parts[4] === "gpx"
+
+      if (!routeId) {
+        return jsonResponse({ error: "Id percorso mancante" }, 400, origin)
+      }
+
+      const data = await loadRoute(env, routeId)
+      if (!data) {
+        return jsonResponse({ error: "Percorso non trovato" }, 404, origin)
+      }
+
+      if (wantsGpx) {
+        return new Response(data.gpx, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/gpx+xml",
+            "Cache-Control": "public, max-age=3600",
+            ...corsHeaders(origin),
+          },
+        })
+      }
+
+      return jsonResponse(
+        {
+          id: data.id,
+          title: data.title,
+          description: data.description,
+          gpxUrl: `https://ikuvium.insidegubbio.com/api/v1/route/${data.id}/gpx`,
+          sections: [
+            {
+              paragraphs: data.pois.map(p => `${p.index} ${p.name}`),
+            },
+          ],
+        },
+        200,
+        origin
+      )
     }
 
     if (request.method === "POST" && url.pathname === "/api/v1/itinerary") {
@@ -288,7 +446,7 @@ export default {
       const model = env.GEMINI_MODEL || DEFAULT_MODEL
 
       try {
-        return await streamGemini(apiKey, model, prompt, monuments, systemPromptTemplate, origin)
+        return await streamGemini(env, apiKey, model, prompt, monuments, systemPromptTemplate, origin)
       } catch (err) {
         return jsonResponse({ error: err.message || "Errore Gemini" }, 502, origin)
       }
