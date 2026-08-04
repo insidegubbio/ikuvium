@@ -46,20 +46,59 @@ function makeRouteId() {
   return crypto.randomUUID().replace(/-/g, "").slice(0, 12)
 }
 
+// Estrae coordinate dal campo visitabilita quando coordinate è null
+// Es: "accessibile - 43.35341917161729, 12.578475100306797"
+function parseCoordinateFromVisitabilita(visitabilita) {
+  if (!visitabilita) return null
+  const match = visitabilita.match(/(4[0-9]\.[0-9]+)\s*,\s*(1[0-9]\.[0-9]+)/)
+  if (!match) return null
+  const lat = parseFloat(match[1])
+  const lng = parseFloat(match[2])
+  if (isNaN(lat) || isNaN(lng)) return null
+  return { lat, lng }
+}
+
 function parseMonuments(data) {
   const list = Array.isArray(data?.monumenti) ? data.monumenti : []
-  if (list.length) console.log("MONUMENT SAMPLE:", JSON.stringify(list[0]))
+  if (list.length) {
+    console.log("MONUMENT SAMPLE:", JSON.stringify(list[0]))
+    console.log("TUTTI I NOMI:", list.map(m => m.nome).join(" | "))
+  }
   const seen = new Set()
   const out = []
   for (const m of list) {
     if (!m?.nome || seen.has(m.nome)) continue
     seen.add(m.nome)
+
+    // 1. Prova coordinate nested (lat/lng oppure lat/lon)
+    let lat = m.coordinate?.lat ?? m.coordinate?.latitude ?? null
+    let lng = m.coordinate?.lng ?? m.coordinate?.lon ?? m.coordinate?.longitude ?? null
+
+    // 2. Prova coordinate flat al root
+    if (lat === null) lat = m.lat ?? m.latitude ?? null
+    if (lng === null) lng = m.lng ?? m.lon ?? m.longitude ?? null
+
+    // 3. Estrai da stringa visitabilita (es. "accessibile - 43.35, 12.57")
+    if (lat === null || lng === null) {
+      const extracted = parseCoordinateFromVisitabilita(m.visitabilita)
+      if (extracted) {
+        lat = extracted.lat
+        lng = extracted.lng
+      }
+    }
+
+    if (!lat || !lng) {
+      console.warn("COORDINATE MANCANTI:", m.nome)
+    }
+
     out.push({
       nome: m.nome,
+      zona: m.zona || m.area || "",
       valutazione: m.valutazione || "",
-      visitabilita: m.visitabilita || "",
+      // Rimuove le coordinate embedded dalla stringa visitabilita
+      visitabilita: (m.visitabilita || "").replace(/\s*-\s*[0-9]+\.[0-9]+\s*,\s*[0-9]+\.[0-9]+/, "").trim(),
       link: m.link || m.url || "",
-      coordinate: { lat: m.coordinate?.lat ?? 0, lng: m.coordinate?.lng ?? 0 },
+      coordinate: { lat: lat ?? 0, lng: lng ?? 0 },
     })
   }
   return out
@@ -124,14 +163,56 @@ function buildMonumentsContext(monuments) {
     .join("\n")
 }
 
+function normalizeMonumentName(str) {
+  return (str || "")
+    .trim()
+    .toLowerCase()
+    // Numeri in lettere → cifre
+    .replace(/\bquaranta\b/g, "40")
+    .replace(/\bventi\b/g, "20")
+    .replace(/\bdieci\b/g, "10")
+    .replace(/\bcinquanta\b/g, "50")
+    // Varianti lessicali comuni
+    .replace(/\blogge\b/g, "loggia")
+    .replace(/\bduomo\b/g, "cattedrale")
+    .replace(/\bss\.\s*/g, "santi ")
+    .replace(/\bs\.\s*/g, "san ")
+    .replace(/\bst\.\s*/g, "santa ")
+    // Rimuove suffissi tipo "(Via Ducale)"
+    .replace(/\s*\(.*?\)\s*/g, "")
+    // Rimuove articoli e preposizioni
+    .replace(/\b(di|del|della|dei|degli|delle|il|la|le|lo|i|gli)\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
 function findMonumentByName(monuments, nome) {
-  const target = (nome || "").trim().toLowerCase()
-  const exact = monuments.find(m => m.nome.trim().toLowerCase() === target)
+  const target = normalizeMonumentName(nome)
+
+  // 1. Match esatto normalizzato
+  const exact = monuments.find(m => normalizeMonumentName(m.nome) === target)
   if (exact) return exact
-  return monuments.find(m => {
-    const mn = m.nome.trim().toLowerCase()
+
+  // 2. Contains (entrambe le direzioni)
+  const partial = monuments.find(m => {
+    const mn = normalizeMonumentName(m.nome)
     return mn.includes(target) || target.includes(mn)
-  }) || null
+  })
+  if (partial) return partial
+
+  // 3. Match per parole chiave (almeno 2 parole significative in comune)
+  const targetWords = target.split(" ").filter(w => w.length > 3)
+  if (targetWords.length >= 2) {
+    const best = monuments.find(m => {
+      const mnWords = normalizeMonumentName(m.nome).split(" ")
+      const matches = targetWords.filter(w => mnWords.includes(w))
+      return matches.length >= 2
+    })
+    if (best) return best
+  }
+
+  console.warn(`NON TROVATO dopo normalizzazione: "${nome}" → "${target}"`)
+  return null
 }
 
 async function generateRouteGpx(routeTitle, routeDescription, pois) {
@@ -290,7 +371,6 @@ async function streamGemini(env, apiKey, model, userPrompt, monuments, systemPro
           const resolvedPois = structured.pois
             .map(p => {
               const m = findMonumentByName(monuments, p.nome || p.name)
-              if (!m) console.log("NON TROVATO:", p.nome || p.name)
               if (!m) return null
               return { nome: m.nome, lat: m.coordinate.lat, lon: m.coordinate.lng, link: m.link }
             })
