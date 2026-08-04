@@ -125,7 +125,12 @@ function buildMonumentsContext(monuments) {
 
 function findMonumentByName(monuments, nome) {
   const target = (nome || "").trim().toLowerCase()
-  return monuments.find(m => m.nome.trim().toLowerCase() === target) || null
+  const exact = monuments.find(m => m.nome.trim().toLowerCase() === target)
+  if (exact) return exact
+  return monuments.find(m => {
+    const mn = m.nome.trim().toLowerCase()
+    return mn.includes(target) || target.includes(mn)
+  }) || null
 }
 
 async function generateRouteGpx(routeTitle, routeDescription, pois) {
@@ -284,6 +289,7 @@ async function streamGemini(env, apiKey, model, userPrompt, monuments, systemPro
           const resolvedPois = structured.pois
             .map(p => {
               const m = findMonumentByName(monuments, p.nome || p.name)
+              if (!m) console.log("NON TROVATO:", p.nome || p.name)
               if (!m) return null
               return { nome: m.nome, lat: m.coordinate.lat, lon: m.coordinate.lng, link: m.link }
             })
@@ -359,14 +365,14 @@ export default {
       return jsonResponse({ status: "ok" }, 200, origin)
     }
 
-  if (request.method === "GET" && url.pathname.startsWith("/api/v1/route/")) {
+    if (request.method === "GET" && url.pathname.startsWith("/api/v1/route/")) {
       const parts = url.pathname.split("/").filter(Boolean)
       const lastSegment = parts[3]
-  
+
       const wantsGpx = lastSegment.endsWith(".gpx") || parts[4] === "gpx"
-      const routeId = lastSegment.endsWith(".gpx") 
-          ? lastSegment.slice(0, -4) 
-          : lastSegment
+      const routeId = lastSegment.endsWith(".gpx")
+        ? lastSegment.slice(0, -4)
+        : lastSegment
 
       if (!routeId) {
         return jsonResponse({ error: "Id percorso mancante" }, 400, origin)
@@ -378,14 +384,14 @@ export default {
       }
 
       if (wantsGpx) {
-          return new Response(data.gpx, {
-              status: 200,
-              headers: {
-                  "Content-Type": "application/gpx+xml",
-                  "Cache-Control": "public, max-age=3600",
-                  "Access-Control-Allow-Origin": "*",
-              },
-          })
+        return new Response(data.gpx, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/gpx+xml",
+            "Cache-Control": "public, max-age=3600",
+            "Access-Control-Allow-Origin": "*",
+          },
+        })
       }
 
       return jsonResponse(
