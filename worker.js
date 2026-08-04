@@ -48,6 +48,7 @@ function makeRouteId() {
 
 function parseMonuments(data) {
   const list = Array.isArray(data?.monumenti) ? data.monumenti : []
+  if (list.length) console.log("MONUMENT SAMPLE:", JSON.stringify(list[0]))
   const seen = new Set()
   const out = []
   for (const m of list) {
