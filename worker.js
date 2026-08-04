@@ -46,8 +46,6 @@ function makeRouteId() {
   return crypto.randomUUID().replace(/-/g, "").slice(0, 12)
 }
 
-// Estrae coordinate dal campo visitabilita quando coordinate è null
-// Es: "accessibile - 43.35341917161729, 12.578475100306797"
 function parseCoordinateFromVisitabilita(visitabilita) {
   if (!visitabilita) return null
   const match = visitabilita.match(/(4[0-9]\.[0-9]+)\s*,\s*(1[0-9]\.[0-9]+)/)
@@ -70,15 +68,12 @@ function parseMonuments(data) {
     if (!m?.nome || seen.has(m.nome)) continue
     seen.add(m.nome)
 
-    // 1. Prova coordinate nested (lat/lng oppure lat/lon)
     let lat = m.coordinate?.lat ?? m.coordinate?.latitude ?? null
     let lng = m.coordinate?.lng ?? m.coordinate?.lon ?? m.coordinate?.longitude ?? null
 
-    // 2. Prova coordinate flat al root
     if (lat === null) lat = m.lat ?? m.latitude ?? null
     if (lng === null) lng = m.lng ?? m.lon ?? m.longitude ?? null
 
-    // 3. Estrai da stringa visitabilita (es. "accessibile - 43.35, 12.57")
     if (lat === null || lng === null) {
       const extracted = parseCoordinateFromVisitabilita(m.visitabilita)
       if (extracted) {
@@ -95,7 +90,6 @@ function parseMonuments(data) {
       nome: m.nome,
       zona: m.zona || m.area || "",
       valutazione: m.valutazione || "",
-      // Rimuove le coordinate embedded dalla stringa visitabilita
       visitabilita: (m.visitabilita || "").replace(/\s*-\s*[0-9]+\.[0-9]+\s*,\s*[0-9]+\.[0-9]+/, "").trim(),
       link: m.link || m.url || "",
       coordinate: { lat: lat ?? 0, lng: lng ?? 0 },
@@ -167,20 +161,16 @@ function normalizeMonumentName(str) {
   return (str || "")
     .trim()
     .toLowerCase()
-    // Numeri in lettere → cifre
     .replace(/\bquaranta\b/g, "40")
     .replace(/\bventi\b/g, "20")
     .replace(/\bdieci\b/g, "10")
     .replace(/\bcinquanta\b/g, "50")
-    // Varianti lessicali comuni
     .replace(/\blogge\b/g, "loggia")
     .replace(/\bduomo\b/g, "cattedrale")
     .replace(/\bss\.\s*/g, "santi ")
     .replace(/\bs\.\s*/g, "san ")
     .replace(/\bst\.\s*/g, "santa ")
-    // Rimuove suffissi tipo "(Via Ducale)"
     .replace(/\s*\(.*?\)\s*/g, "")
-    // Rimuove articoli e preposizioni
     .replace(/\b(di|del|della|dei|degli|delle|il|la|le|lo|i|gli)\b/g, "")
     .replace(/\s+/g, " ")
     .trim()
@@ -189,18 +179,15 @@ function normalizeMonumentName(str) {
 function findMonumentByName(monuments, nome) {
   const target = normalizeMonumentName(nome)
 
-  // 1. Match esatto normalizzato
   const exact = monuments.find(m => normalizeMonumentName(m.nome) === target)
   if (exact) return exact
 
-  // 2. Contains (entrambe le direzioni)
   const partial = monuments.find(m => {
     const mn = normalizeMonumentName(m.nome)
     return mn.includes(target) || target.includes(mn)
   })
   if (partial) return partial
 
-  // 3. Match per parole chiave (almeno 2 parole significative in comune)
   const targetWords = target.split(" ").filter(w => w.length > 3)
   if (targetWords.length >= 2) {
     const best = monuments.find(m => {
