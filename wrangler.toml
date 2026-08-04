@@ -5,7 +5,7 @@ compatibility_flags = ["nodejs_compat"]
 
 [[kv_namespaces]]
 binding = "ROUTES_KV"
-id = "ikuvium"
+id = "a6228dd3167d4d03a06fa42e41272964"
 
 [[services]]
 binding = "MONUMENTI"
