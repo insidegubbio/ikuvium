@@ -2,6 +2,9 @@ const ALLOWED_ORIGIN_PATTERN =
   /^https?:\/\/(([\w-]+\.)?insidegubbio\.com|([\w-]+\.)?insidegubbio\.framer\.ai)$/
 
 const DEFAULT_MODEL = "gemini-3.1-flash-lite"
+const GRAPHHOPPER_BASE = "https://graphhopper.insidegubbio.com"
+const POI_BASE_URL = "https://www.insidegubbio.com"
+const PIN_BASE_URL = "https://vassallo.insidegubbio.com/svg/pin"
 
 let memCache = null
 let memCacheTime = 0
@@ -91,7 +94,7 @@ function parseMonuments(data) {
       zona: m.zona || m.area || "",
       valutazione: m.valutazione || "",
       visitabilita: (m.visitabilita || "").replace(/\s*-\s*[0-9]+\.[0-9]+\s*,\s*[0-9]+\.[0-9]+/, "").trim(),
-      link: m.link || m.url || "",
+      slug: m.slug || m.link || m.url || "",
       coordinate: { lat: lat ?? 0, lng: lng ?? 0 },
     })
   }
@@ -152,7 +155,7 @@ function buildMonumentsContext(monuments) {
       return true
     })
     .map((m, i) =>
-      `${i + 1}. ${m.nome} | zona: ${m.zona || "centro_medio"} | coord: ${m.coordinate.lat.toFixed(4)},${m.coordinate.lng.toFixed(4)} | rilevanza: ${m.valutazione} | visitabilità: ${m.visitabilita} | link: ${m.link || "n/d"}`
+      `${i + 1}. ${m.nome} | zona: ${m.zona || "centro_medio"} | coord: ${m.coordinate.lat.toFixed(4)},${m.coordinate.lng.toFixed(4)} | rilevanza: ${m.valutazione} | visitabilità: ${m.visitabilita} | link: ${m.slug || "n/d"}`
     )
     .join("\n")
 }
@@ -198,43 +201,84 @@ function findMonumentByName(monuments, nome) {
     if (best) return best
   }
 
-  console.warn(`NON TROVATO dopo normalizzazione: "${nome}" → "${target}"`)
+  console.warn(`NON TROVATO: "${nome}" -> "${target}"`)
   return null
 }
 
-async function generateRouteGpx(routeTitle, routeDescription, pois) {
-  const body = {
-    name: routeTitle,
-    description: routeDescription,
-    create_track: true,
-    routing: true,
-    profile: "foot",
-    color: "2C3229",
-    pois: pois.map((p, i) => ({
-      lat: p.lat,
-      lon: p.lon,
-      name: p.nome,
-      icon_url: `https://vassallo.insidegubbio.com/svg/pin/${i + 1}.svg`,
-      link: p.link || undefined,
-    })),
+function poiLink(slug) {
+  if (!slug) return null
+  if (slug.startsWith("http")) return slug
+  return `${POI_BASE_URL}/${slug.replace(/^\//, "")}`
+}
+
+async function fetchGraphHopperRoute(pois) {
+  const params = new URLSearchParams()
+  for (const p of pois) {
+    params.append("point", `${p.lat},${p.lon}`)
   }
+  params.set("profile", "foot")
+  params.set("points_encoded", "false")
+
+  const url = `${GRAPHHOPPER_BASE}/route?${params.toString()}`
+  console.log("GraphHopper URL:", url)
 
   const res = await withTimeout(
-    fetch("https://condottiero.insidegubbio.com/api/gpx", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }),
+    fetch(url, { headers: { Accept: "application/json" } }),
     GPX_FETCH_TIMEOUT,
-    "Generazione gpx"
+    "GraphHopper route"
   )
 
   if (!res.ok) {
     const text = await res.text().catch(() => "")
-    throw new Error(`Errore generazione gpx: ${res.status} ${text.slice(0, 200)}`)
+    throw new Error(`GraphHopper ${res.status}: ${text.slice(0, 200)}`)
   }
 
-  return res.text()
+  const data = await res.json()
+  const path = data?.paths?.[0]
+  if (!path) throw new Error("GraphHopper: nessun percorso trovato")
+
+  return path.points?.coordinates || []
+}
+
+function buildGpx(routeTitle, routeDescription, pois, trackCoords) {
+  const escape = s => (s || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+
+  const wpts = pois.map((p, i) => {
+    const link = poiLink(p.slug)
+    const pinUrl = `${PIN_BASE_URL}/${Math.min(i + 1, 15)}.svg`
+    return `  <wpt lat="${p.lat}" lon="${p.lon}">
+    <name>${escape(p.nome)}</name>
+    <sym>${escape(pinUrl)}</sym>${link ? `\n    <link href="${escape(link)}"><text>${escape(p.nome)}</text></link>` : ""}
+  </wpt>`
+  }).join("\n")
+
+  const trkpts = trackCoords.map(([lng, lat, ele]) =>
+    `      <trkpt lat="${lat}" lon="${lng}">${ele != null ? `<ele>${ele.toFixed(1)}</ele>` : ""}</trkpt>`
+  ).join("\n")
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="Ikuvium" xmlns="http://www.topografix.com/GPX/1/1">
+  <metadata>
+    <name>${escape(routeTitle)}</name>
+    <desc>${escape(routeDescription)}</desc>
+  </metadata>
+${wpts}
+  <trk>
+    <name>${escape(routeTitle)}</name>
+    <trkseg>
+${trkpts}
+    </trkseg>
+  </trk>
+</gpx>`
+}
+
+async function generateRouteGpx(routeTitle, routeDescription, pois) {
+  const trackCoords = await fetchGraphHopperRoute(pois)
+  return buildGpx(routeTitle, routeDescription, pois, trackCoords)
 }
 
 async function saveRoute(env, routeId, data) {
@@ -359,7 +403,12 @@ async function streamGemini(env, apiKey, model, userPrompt, monuments, systemPro
             .map(p => {
               const m = findMonumentByName(monuments, p.nome || p.name)
               if (!m) return null
-              return { nome: m.nome, lat: m.coordinate.lat, lon: m.coordinate.lng, link: m.link }
+              return {
+                nome: m.nome,
+                lat: m.coordinate.lat,
+                lon: m.coordinate.lng,
+                slug: m.slug,
+              }
             })
             .filter(Boolean)
 
@@ -379,7 +428,8 @@ async function streamGemini(env, apiKey, model, userPrompt, monuments, systemPro
               pois: resolvedPois.map((p, i) => ({
                 index: i + 1,
                 name: p.nome,
-                link: p.link,
+                link: poiLink(p.slug),
+                pinUrl: `${PIN_BASE_URL}/${Math.min(i + 1, 15)}.svg`,
                 lat: p.lat,
                 lon: p.lon,
               })),
@@ -468,6 +518,7 @@ export default {
           title: data.title,
           description: data.description,
           gpxUrl: `https://ikuvium.insidegubbio.com/api/v1/route/${data.id}.gpx`,
+          pois: data.pois,
           sections: [
             {
               paragraphs: data.pois.map(p => `${p.index} ${p.name}`),
