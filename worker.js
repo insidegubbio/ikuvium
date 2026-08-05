@@ -392,6 +392,62 @@ async function getGoogleAccessToken(env) {
   return data.access_token
 }
 
+async function createMyMap(env, routeTitle, routeDescription, pois, trackCoords) {
+  const accessToken = await getGoogleAccessToken(env)
+  const kml = buildKml(routeTitle, routeDescription, pois, trackCoords)
+ 
+  const metadata = JSON.stringify({
+    name: routeTitle,
+    mimeType: "application/vnd.google-earth.kml+xml",
+    parents: [env.GOOGLE_DRIVE_FOLDER_ID],
+  })
+ 
+  const boundary = "-------ikuvium"
+  const body = [
+    `--${boundary}`,
+    "Content-Type: application/json; charset=UTF-8",
+    "",
+    metadata,
+    `--${boundary}`,
+    "Content-Type: application/vnd.google-earth.kml+xml",
+    "",
+    kml,
+    `--${boundary}--`,
+  ].join("\r\n")
+ 
+  const uploadRes = await fetch(
+    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": `multipart/related; boundary=${boundary}`,
+      },
+      body,
+    }
+  )
+ 
+  const uploaded = await uploadRes.json()
+  if (!uploaded.id) throw new Error("Upload KML fallito: " + JSON.stringify(uploaded))
+ 
+  await fetch(
+    `https://www.googleapis.com/drive/v3/files/${uploaded.id}/permissions`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ role: "reader", type: "anyone", withLink: true }),
+    }
+  )
+ 
+  return {
+    driveFileId: uploaded.id,
+    mapsUrl: `https://www.google.com/maps/d/viewer?mid=${uploaded.id}`,
+  }
+}
+
 async function deleteMyMap(env, driveFileId) {
   try {
     const accessToken = await getGoogleAccessToken(env)
