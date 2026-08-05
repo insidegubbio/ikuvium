@@ -1,7 +1,7 @@
 const ALLOWED_ORIGIN_PATTERN =
   /^https?:\/\/(([\w-]+\.)?insidegubbio\.com|([\w-]+\.)?insidegubbio\.framer\.ai)$/
 
-const DEFAULT_MODEL = "gemini-3.1-flash-lite"
+const DEFAULT_MODEL = "gemini-3.5-flash-lite"
 const GRAPHHOPPER_BASE = "https://graphhopper.insidegubbio.com"
 const POI_BASE_URL = "https://www.insidegubbio.com"
 const PIN_BASE_URL = "https://vassallo.insidegubbio.com/svg/pin"
