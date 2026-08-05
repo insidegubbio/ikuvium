@@ -263,8 +263,8 @@ function buildGpx(routeTitle, routeDescription, pois, trackCoords) {
     return `  <wpt lat="${p.lat}" lon="${p.lon}">
     <name>${escape(p.nome)}</name>
     <link href="${svgHref}">
-      <type>condottiero:customIcon</type>${link ? `\n      <text>${escape(link)}</text>` : ""}
-    </link>
+      <type>condottiero:customIcon</type>
+    </link>${link ? `\n    <link href="${escape(link)}"><text>${escape(p.nome)}</text></link>` : ""}
     <type>condottiero:custom::0.35</type>
   </wpt>`
   }).join("\n")
