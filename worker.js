@@ -247,12 +247,25 @@ function buildGpx(routeTitle, routeDescription, pois, trackCoords) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
 
+  const makePinSvg = (index) => {
+    const num = Math.min(index, 15)
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+  <path d="M50,5 C28,5 10,22 10,44 C10,60 20,72 34,82 L50,100 L66,82 C80,72 90,60 90,44 C90,22 72,5 50,5 Z" fill="#2C3229"/>
+  <text x="50" y="44" font-family="'Satoshi','Helvetica Neue',sans-serif" font-weight="700" font-size="30" fill="#DFE5D7" text-anchor="middle" dominant-baseline="central">${num}</text>
+</svg>
+`
+    return "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg)
+  }
+
   const wpts = pois.map((p, i) => {
     const link = poiLink(p.slug)
-    const pinUrl = `${PIN_BASE_URL}/${Math.min(i + 1, 15)}.svg`
+    const svgHref = makePinSvg(i + 1)
     return `  <wpt lat="${p.lat}" lon="${p.lon}">
     <name>${escape(p.nome)}</name>
-    <sym>${escape(pinUrl)}</sym>${link ? `\n    <link href="${escape(link)}"><text>${escape(p.nome)}</text></link>` : ""}
+    <link href="${svgHref}">
+      <type>condottiero:customIcon</type>${link ? `\n      <text>${escape(link)}</text>` : ""}
+    </link>
+    <type>condottiero:custom::0.35</type>
   </wpt>`
   }).join("\n")
 
@@ -261,7 +274,7 @@ function buildGpx(routeTitle, routeDescription, pois, trackCoords) {
   ).join("\n")
 
   return `<?xml version="1.0" encoding="UTF-8"?>
-<gpx version="1.1" creator="Ikuvium" xmlns="http://www.topografix.com/GPX/1/1">
+<gpx version="1.1" creator="Ikuvium" xmlns="http://www.topografix.com/GPX/1/1" xmlns:gpx_style="http://www.topografix.com/GPX/gpx_style/0/2">
   <metadata>
     <name>${escape(routeTitle)}</name>
     <desc>${escape(routeDescription)}</desc>
@@ -269,6 +282,13 @@ function buildGpx(routeTitle, routeDescription, pois, trackCoords) {
 ${wpts}
   <trk>
     <name>${escape(routeTitle)}</name>
+    <extensions>
+      <gpx_style:line>
+        <gpx_style:color>2C3229</gpx_style:color>
+        <gpx_style:opacity>1.0</gpx_style:opacity>
+        <gpx_style:width>4</gpx_style:width>
+      </gpx_style:line>
+    </extensions>
     <trkseg>
 ${trkpts}
     </trkseg>
