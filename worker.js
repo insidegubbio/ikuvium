@@ -4,7 +4,6 @@ const ALLOWED_ORIGIN_PATTERN =
 const DEFAULT_MODEL = "gemini-3.1-flash-lite"
 const GRAPHHOPPER_BASE = "https://graphhopper.insidegubbio.com"
 const POI_BASE_URL = "https://www.insidegubbio.com"
-const PIN_BASE_URL = "https://vassallo.insidegubbio.com/svg/pin"
 
 let memCache = null
 let memCacheTime = 0
@@ -296,9 +295,157 @@ ${trkpts}
 </gpx>`
 }
 
-async function generateRouteGpx(routeTitle, routeDescription, pois) {
-  const trackCoords = await fetchGraphHopperRoute(pois)
-  return buildGpx(routeTitle, routeDescription, pois, trackCoords)
+function buildKml(routeTitle, routeDescription, pois, trackCoords) {
+  const escape = s => (s || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+
+  const placemarks = pois.map((p) => {
+    const link = poiLink(p.slug)
+    return `  <Placemark>
+    <name>${escape(p.nome)}</name>
+    <description><![CDATA[${link ? `<a href="${link}">${escape(p.nome)}</a>` : escape(p.nome)}]]></description>
+    <Point><coordinates>${p.lon},${p.lat},0</coordinates></Point>
+  </Placemark>`
+  }).join("\n")
+
+  const trackPoints = trackCoords
+    .map(([lng, lat, ele]) => `${lng},${lat},${ele ?? 0}`)
+    .join(" ")
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>${escape(routeTitle)}</name>
+    <description>${escape(routeDescription)}</description>
+${placemarks}
+    <Placemark>
+      <name>${escape(routeTitle)}</name>
+      <LineString>
+        <tessellate>1</tessellate>
+        <coordinates>${trackPoints}</coordinates>
+      </LineString>
+    </Placemark>
+  </Document>
+</kml>`
+}
+
+async function getGoogleAccessToken(env) {
+  const header = btoa(JSON.stringify({ alg: "RS256", typ: "JWT" }))
+  const now = Math.floor(Date.now() / 1000)
+  const claim = btoa(JSON.stringify({
+    iss: env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+    scope: "https://www.googleapis.com/auth/drive.file",
+    aud: "https://oauth2.googleapis.com/token",
+    exp: now + 3600,
+    iat: now,
+  }))
+
+  const unsigned = `${header}.${claim}`
+  const privateKey = env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY.replace(/\\n/g, "\n")
+
+  const keyData = privateKey
+    .replace("-----BEGIN PRIVATE KEY-----", "")
+    .replace("-----END PRIVATE KEY-----", "")
+    .replace(/\s/g, "")
+
+  const binaryKey = Uint8Array.from(atob(keyData), c => c.charCodeAt(0))
+  const cryptoKey = await crypto.subtle.importKey(
+    "pkcs8",
+    binaryKey,
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["sign"]
+  )
+
+  const signature = await crypto.subtle.sign(
+    "RSASSA-PKCS1-v1_5",
+    cryptoKey,
+    new TextEncoder().encode(unsigned)
+  )
+
+  const sig = btoa(String.fromCharCode(...new Uint8Array(signature)))
+  const jwt = `${unsigned}.${sig}`
+
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`,
+  })
+
+  const data = await res.json()
+  if (!data.access_token) throw new Error("Google auth fallita: " + JSON.stringify(data))
+  return data.access_token
+}
+
+async function createMyMap(env, routeTitle, routeDescription, pois, trackCoords) {
+  const accessToken = await getGoogleAccessToken(env)
+  const kml = buildKml(routeTitle, routeDescription, pois, trackCoords)
+
+  const metadata = JSON.stringify({
+    name: routeTitle,
+    mimeType: "application/vnd.google-earth.kml+xml",
+    parents: [env.GOOGLE_DRIVE_FOLDER_ID],
+  })
+
+  const boundary = "-------ikuvium"
+  const body = [
+    `--${boundary}`,
+    "Content-Type: application/json; charset=UTF-8",
+    "",
+    metadata,
+    `--${boundary}`,
+    "Content-Type: application/vnd.google-earth.kml+xml",
+    "",
+    kml,
+    `--${boundary}--`,
+  ].join("\r\n")
+
+  const uploadRes = await fetch(
+    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": `multipart/related; boundary=${boundary}`,
+      },
+      body,
+    }
+  )
+
+  const uploaded = await uploadRes.json()
+  if (!uploaded.id) throw new Error("Upload KML fallito: " + JSON.stringify(uploaded))
+
+  await fetch(
+    `https://www.googleapis.com/drive/v3/files/${uploaded.id}/permissions`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ role: "reader", type: "anyone", withLink: true }),
+    }
+  )
+
+  return {
+    driveFileId: uploaded.id,
+    mapsUrl: `https://www.google.com/maps/d/viewer?mid=${uploaded.id}`,
+  }
+}
+
+async function deleteMyMap(env, driveFileId) {
+  try {
+    const accessToken = await getGoogleAccessToken(env)
+    await fetch(`https://www.googleapis.com/drive/v3/files/${driveFileId}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${accessToken}` },
+    })
+  } catch (err) {
+    console.error("Errore cancellazione Drive file:", err.message)
+  }
 }
 
 async function saveRoute(env, routeId, data) {
@@ -434,22 +581,33 @@ async function streamGemini(env, apiKey, model, userPrompt, monuments, systemPro
 
           if (resolvedPois.length >= 2) {
             const routeId = makeRouteId()
-            const gpxText = await generateRouteGpx(
-              structured.title || "Percorso Gubbio",
-              structured.description || "",
-              resolvedPois
-            )
+            const title = structured.title || "Percorso Gubbio"
+            const description = structured.description || ""
+
+            const trackCoords = await fetchGraphHopperRoute(resolvedPois)
+            const gpxText = buildGpx(title, description, resolvedPois, trackCoords)
+
+            let mapsUrl = null
+            let driveFileId = null
+            try {
+              const myMap = await createMyMap(env, title, description, resolvedPois, trackCoords)
+              mapsUrl = myMap.mapsUrl
+              driveFileId = myMap.driveFileId
+            } catch (err) {
+              console.error("My Maps fallita:", err.message)
+            }
 
             await saveRoute(env, routeId, {
               id: routeId,
-              title: structured.title || "Percorso Gubbio",
-              description: structured.description || "",
+              title,
+              description,
               gpx: gpxText,
+              mapsUrl,
+              driveFileId,
               pois: resolvedPois.map((p, i) => ({
                 index: i + 1,
                 name: p.nome,
                 link: poiLink(p.slug),
-                pinUrl: `${PIN_BASE_URL}/${Math.min(i + 1, 15)}.svg`,
                 lat: p.lat,
                 lon: p.lon,
               })),
@@ -457,7 +615,7 @@ async function streamGemini(env, apiKey, model, userPrompt, monuments, systemPro
             })
 
             await writer.write(
-              encoder.encode(`data: ${JSON.stringify({ routeReady: true, routeId })}\n\n`)
+              encoder.encode(`data: ${JSON.stringify({ routeReady: true, routeId, mapsUrl })}\n\n`)
             )
           }
         } catch (err) {
@@ -518,6 +676,9 @@ export default {
 
       const data = await loadRoute(env, routeId)
       if (!data) {
+        if (data?.driveFileId) {
+          ctx.waitUntil(deleteMyMap(env, data.driveFileId))
+        }
         return jsonResponse({ error: "Percorso non trovato" }, 404, origin)
       }
 
@@ -538,6 +699,7 @@ export default {
           title: data.title,
           description: data.description,
           gpxUrl: `https://ikuvium.insidegubbio.com/api/v1/route/${data.id}.gpx`,
+          mapsUrl: data.mapsUrl || null,
           pois: data.pois,
           sections: [
             {
@@ -548,6 +710,26 @@ export default {
         200,
         origin
       )
+    }
+
+    if (request.method === "DELETE" && url.pathname.startsWith("/api/v1/route/")) {
+      const parts = url.pathname.split("/").filter(Boolean)
+      const routeId = parts[3]
+
+      if (!routeId) return jsonResponse({ error: "Id percorso mancante" }, 400, origin)
+
+      const data = await loadRoute(env, routeId)
+      if (!data) return jsonResponse({ error: "Percorso non trovato" }, 404, origin)
+
+      if (data.driveFileId) {
+        ctx.waitUntil(deleteMyMap(env, data.driveFileId))
+      }
+
+      if (env.ROUTES_KV) {
+        ctx.waitUntil(env.ROUTES_KV.delete(`route:${routeId}`))
+      }
+
+      return jsonResponse({ ok: true }, 200, origin)
     }
 
     if (request.method === "POST" && url.pathname === "/api/v1/itinerary") {
