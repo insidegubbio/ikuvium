@@ -332,6 +332,134 @@ ${placemarks}
 </kml>`
 }
 
+function arrayBufferToBase64Url(buffer) {
+  const bytes = new Uint8Array(buffer)
+  let str = ""
+  for (const b of bytes) str += String.fromCharCode(b)
+  return btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "")
+}
+
+function toBase64Url(str) {
+  return btoa(unescape(encodeURIComponent(str)))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "")
+}
+
+async function getGoogleAccessToken(env) {
+  const header = toBase64Url(JSON.stringify({ alg: "RS256", typ: "JWT" }))
+  const now = Math.floor(Date.now() / 1000)
+  const claim = toBase64Url(JSON.stringify({
+    iss: env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+    scope: "https://www.googleapis.com/auth/drive.file",
+    aud: "https://oauth2.googleapis.com/token",
+    exp: now + 3600,
+    iat: now,
+  }))
+
+  const unsigned = `${header}.${claim}`
+  const privateKey = env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY.replace(/\\n/g, "\n")
+
+  const keyData = privateKey
+    .replace("-----BEGIN PRIVATE KEY-----", "")
+    .replace("-----END PRIVATE KEY-----", "")
+    .replace(/\s/g, "")
+
+  const binaryKey = Uint8Array.from(atob(keyData), c => c.charCodeAt(0))
+  const cryptoKey = await crypto.subtle.importKey(
+    "pkcs8",
+    binaryKey,
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["sign"]
+  )
+
+  const signature = await crypto.subtle.sign(
+    "RSASSA-PKCS1-v1_5",
+    cryptoKey,
+    new TextEncoder().encode(unsigned)
+  )
+
+  const sig = arrayBufferToBase64Url(signature)
+  const jwt = `${unsigned}.${sig}`
+
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`,
+  })
+
+  const data = await res.json()
+  if (!data.access_token) throw new Error("Google auth fallita: " + JSON.stringify(data))
+  return data.access_token
+}
+
+async function createMyMap(env, routeTitle, routeDescription, pois, trackCoords) {
+  const accessToken = await getGoogleAccessToken(env)
+  const kml = buildKml(routeTitle, routeDescription, pois, trackCoords)
+ 
+  const metadata = JSON.stringify({
+    name: routeTitle,
+    mimeType: "application/vnd.google-earth.kml+xml",
+    parents: [env.GOOGLE_DRIVE_FOLDER_ID],
+  })
+ 
+  const boundary = "-------ikuvium"
+  const body = [
+    `--${boundary}`,
+    "Content-Type: application/json; charset=UTF-8",
+    "",
+    metadata,
+    `--${boundary}`,
+    "Content-Type: application/vnd.google-earth.kml+xml",
+    "",
+    kml,
+    `--${boundary}--`,
+  ].join("\r\n")
+ 
+  const uploadRes = await fetch(
+    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": `multipart/related; boundary=${boundary}`,
+      },
+      body,
+    }
+  )
+ 
+  const uploaded = await uploadRes.json()
+  if (!uploaded.id) throw new Error("Upload KML fallito: " + JSON.stringify(uploaded))
+ 
+  await fetch(
+    `https://www.googleapis.com/drive/v3/files/${uploaded.id}/permissions`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ role: "reader", type: "anyone", withLink: true }),
+    }
+  )
+ 
+  return {
+    driveFileId: uploaded.id,
+    mapsUrl: `https://www.google.com/maps/d/viewer?mid=${uploaded.id}`,
+  }
+}
+
+async function deleteMyMap(env, driveFileId) {
+  try {
+    const accessToken = await getGoogleAccessToken(env)
+    await fetch(`https://www.googleapis.com/drive/v3/files/${driveFileId}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${accessToken}` },
+    })
+  } catch (err) {
+    console.error("Errore cancellazione Drive file:", err.message)
+  }
+}
+
 async function saveRoute(env, routeId, data) {
   if (!env.ROUTES_KV) return
   await env.ROUTES_KV.put(`route:${routeId}`, JSON.stringify(data), {
@@ -358,10 +486,6 @@ function extractJsonBlock(text) {
   } catch {
     return null
   }
-}
-
-function buildMapsViewerUrl(kmlPublicUrl) {
-  return `https://www.google.com/maps/d/viewer?hl=it&z=14&q=${encodeURIComponent(kmlPublicUrl)}`
 }
 
 async function streamGemini(env, apiKey, model, userPrompt, monuments, systemPromptTemplate, origin) {
@@ -474,18 +598,27 @@ async function streamGemini(env, apiKey, model, userPrompt, monuments, systemPro
 
             const trackCoords = await fetchGraphHopperRoute(resolvedPois)
             const gpxText = buildGpx(title, description, resolvedPois, trackCoords)
-            const kmlText = buildKml(title, description, resolvedPois, trackCoords)
 
-            const kmlPublicUrl = `https://ikuvium.insidegubbio.com/api/v1/route/${routeId}.kml`
-            const mapsUrl = buildMapsViewerUrl(kmlPublicUrl)
+            let mapsUrl = null
+            let driveFileId = null
+            try {
+              const myMap = await createMyMap(env, title, description, resolvedPois, trackCoords)
+              mapsUrl = myMap.mapsUrl
+              driveFileId = myMap.driveFileId
+            } catch (err) {
+              console.error("My Maps fallita:", err.message, err.stack)
+              await writer.write(
+                encoder.encode(`data: ${JSON.stringify({ mapsError: err.message })}\n\n`)
+              )
+            }
 
             await saveRoute(env, routeId, {
               id: routeId,
               title,
               description,
               gpx: gpxText,
-              kml: kmlText,
               mapsUrl,
+              driveFileId,
               pois: resolvedPois.map((p, i) => ({
                 index: i + 1,
                 name: p.nome,
@@ -547,10 +680,8 @@ export default {
       const parts = url.pathname.split("/").filter(Boolean)
       const lastSegment = parts[3]
 
-      const wantsKml = lastSegment.endsWith(".kml")
       const wantsGpx = lastSegment.endsWith(".gpx") || parts[4] === "gpx"
-
-      const routeId = lastSegment.endsWith(".kml") || lastSegment.endsWith(".gpx")
+      const routeId = lastSegment.endsWith(".gpx")
         ? lastSegment.slice(0, -4)
         : lastSegment
 
@@ -561,17 +692,6 @@ export default {
       const data = await loadRoute(env, routeId)
       if (!data) {
         return jsonResponse({ error: "Percorso non trovato" }, 404, origin)
-      }
-
-      if (wantsKml) {
-        return new Response(data.kml, {
-          status: 200,
-          headers: {
-            "Content-Type": "application/vnd.google-earth.kml+xml",
-            "Cache-Control": "public, max-age=3600",
-            "Access-Control-Allow-Origin": "*",
-          },
-        })
       }
 
       if (wantsGpx) {
@@ -591,7 +711,6 @@ export default {
           title: data.title,
           description: data.description,
           gpxUrl: `https://ikuvium.insidegubbio.com/api/v1/route/${data.id}.gpx`,
-          kmlUrl: `https://ikuvium.insidegubbio.com/api/v1/route/${data.id}.kml`,
           mapsUrl: data.mapsUrl || null,
           pois: data.pois,
           sections: [
@@ -613,6 +732,10 @@ export default {
 
       const data = await loadRoute(env, routeId)
       if (!data) return jsonResponse({ error: "Percorso non trovato" }, 404, origin)
+
+      if (data.driveFileId) {
+        ctx.waitUntil(deleteMyMap(env, data.driveFileId))
+      }
 
       if (env.ROUTES_KV) {
         ctx.waitUntil(env.ROUTES_KV.delete(`route:${routeId}`))
