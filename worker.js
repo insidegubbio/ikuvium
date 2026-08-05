@@ -332,10 +332,22 @@ ${placemarks}
 </kml>`
 }
 
+function arrayBufferToBase64Url(buffer) {
+  const bytes = new Uint8Array(buffer)
+  let str = ""
+  for (const b of bytes) str += String.fromCharCode(b)
+  return btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "")
+}
+
+function toBase64Url(str) {
+  return btoa(unescape(encodeURIComponent(str)))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "")
+}
+
 async function getGoogleAccessToken(env) {
-  const header = btoa(JSON.stringify({ alg: "RS256", typ: "JWT" }))
+  const header = toBase64Url(JSON.stringify({ alg: "RS256", typ: "JWT" }))
   const now = Math.floor(Date.now() / 1000)
-  const claim = btoa(JSON.stringify({
+  const claim = toBase64Url(JSON.stringify({
     iss: env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
     scope: "https://www.googleapis.com/auth/drive.file",
     aud: "https://oauth2.googleapis.com/token",
@@ -366,7 +378,7 @@ async function getGoogleAccessToken(env) {
     new TextEncoder().encode(unsigned)
   )
 
-  const sig = btoa(String.fromCharCode(...new Uint8Array(signature)))
+  const sig = arrayBufferToBase64Url(signature)
   const jwt = `${unsigned}.${sig}`
 
   const res = await fetch("https://oauth2.googleapis.com/token", {
@@ -378,62 +390,6 @@ async function getGoogleAccessToken(env) {
   const data = await res.json()
   if (!data.access_token) throw new Error("Google auth fallita: " + JSON.stringify(data))
   return data.access_token
-}
-
-async function createMyMap(env, routeTitle, routeDescription, pois, trackCoords) {
-  const accessToken = await getGoogleAccessToken(env)
-  const kml = buildKml(routeTitle, routeDescription, pois, trackCoords)
-
-  const metadata = JSON.stringify({
-    name: routeTitle,
-    mimeType: "application/vnd.google-earth.kml+xml",
-    parents: [env.GOOGLE_DRIVE_FOLDER_ID],
-  })
-
-  const boundary = "-------ikuvium"
-  const body = [
-    `--${boundary}`,
-    "Content-Type: application/json; charset=UTF-8",
-    "",
-    metadata,
-    `--${boundary}`,
-    "Content-Type: application/vnd.google-earth.kml+xml",
-    "",
-    kml,
-    `--${boundary}--`,
-  ].join("\r\n")
-
-  const uploadRes = await fetch(
-    "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": `multipart/related; boundary=${boundary}`,
-      },
-      body,
-    }
-  )
-
-  const uploaded = await uploadRes.json()
-  if (!uploaded.id) throw new Error("Upload KML fallito: " + JSON.stringify(uploaded))
-
-  await fetch(
-    `https://www.googleapis.com/drive/v3/files/${uploaded.id}/permissions`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ role: "reader", type: "anyone", withLink: true }),
-    }
-  )
-
-  return {
-    driveFileId: uploaded.id,
-    mapsUrl: `https://www.google.com/maps/d/viewer?mid=${uploaded.id}`,
-  }
 }
 
 async function deleteMyMap(env, driveFileId) {
