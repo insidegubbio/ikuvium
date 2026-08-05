@@ -332,61 +332,17 @@ ${placemarks}
 </kml>`
 }
 
-function arrayBufferToBase64Url(buffer) {
-  const bytes = new Uint8Array(buffer)
-  let str = ""
-  for (const b of bytes) str += String.fromCharCode(b)
-  return btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "")
-}
-
-function toBase64Url(str) {
-  return btoa(unescape(encodeURIComponent(str)))
-    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "")
-}
-
 async function getGoogleAccessToken(env) {
-  const header = toBase64Url(JSON.stringify({ alg: "RS256", typ: "JWT" }))
-  const now = Math.floor(Date.now() / 1000)
-  const claim = toBase64Url(JSON.stringify({
-    iss: env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-    scope: "https://www.googleapis.com/auth/drive.file",
-    aud: "https://oauth2.googleapis.com/token",
-    exp: now + 3600,
-    iat: now,
-  }))
-
-  const unsigned = `${header}.${claim}`
-  const privateKey = env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY.replace(/\\n/g, "\n")
-
-  const keyData = privateKey
-    .replace("-----BEGIN PRIVATE KEY-----", "")
-    .replace("-----END PRIVATE KEY-----", "")
-    .replace(/\s/g, "")
-
-  const binaryKey = Uint8Array.from(atob(keyData), c => c.charCodeAt(0))
-  const cryptoKey = await crypto.subtle.importKey(
-    "pkcs8",
-    binaryKey,
-    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
-    false,
-    ["sign"]
-  )
-
-  const signature = await crypto.subtle.sign(
-    "RSASSA-PKCS1-v1_5",
-    cryptoKey,
-    new TextEncoder().encode(unsigned)
-  )
-
-  const sig = arrayBufferToBase64Url(signature)
-  const jwt = `${unsigned}.${sig}`
-
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`,
+    body: new URLSearchParams({
+      client_id: env.GOOGLE_OAUTH_CLIENT_ID,
+      client_secret: env.GOOGLE_OAUTH_CLIENT_SECRET,
+      refresh_token: env.GOOGLE_OAUTH_REFRESH_TOKEN,
+      grant_type: "refresh_token",
+    }),
   })
-
   const data = await res.json()
   if (!data.access_token) throw new Error("Google auth fallita: " + JSON.stringify(data))
   return data.access_token
@@ -395,13 +351,13 @@ async function getGoogleAccessToken(env) {
 async function createMyMap(env, routeTitle, routeDescription, pois, trackCoords) {
   const accessToken = await getGoogleAccessToken(env)
   const kml = buildKml(routeTitle, routeDescription, pois, trackCoords)
- 
+
   const metadata = JSON.stringify({
     name: routeTitle,
     mimeType: "application/vnd.google-earth.kml+xml",
     parents: [env.GOOGLE_DRIVE_FOLDER_ID],
   })
- 
+
   const boundary = "-------ikuvium"
   const body = [
     `--${boundary}`,
@@ -414,7 +370,7 @@ async function createMyMap(env, routeTitle, routeDescription, pois, trackCoords)
     kml,
     `--${boundary}--`,
   ].join("\r\n")
- 
+
   const uploadRes = await fetch(
     "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
     {
@@ -426,10 +382,10 @@ async function createMyMap(env, routeTitle, routeDescription, pois, trackCoords)
       body,
     }
   )
- 
+
   const uploaded = await uploadRes.json()
   if (!uploaded.id) throw new Error("Upload KML fallito: " + JSON.stringify(uploaded))
- 
+
   await fetch(
     `https://www.googleapis.com/drive/v3/files/${uploaded.id}/permissions`,
     {
@@ -441,7 +397,7 @@ async function createMyMap(env, routeTitle, routeDescription, pois, trackCoords)
       body: JSON.stringify({ role: "reader", type: "anyone", withLink: true }),
     }
   )
- 
+
   return {
     driveFileId: uploaded.id,
     mapsUrl: `https://www.google.com/maps/d/viewer?mid=${uploaded.id}`,
