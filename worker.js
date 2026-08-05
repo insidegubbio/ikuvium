@@ -594,7 +594,10 @@ async function streamGemini(env, apiKey, model, userPrompt, monuments, systemPro
               mapsUrl = myMap.mapsUrl
               driveFileId = myMap.driveFileId
             } catch (err) {
-              console.error("My Maps fallita:", err.message)
+              console.error("My Maps fallita:", err.message, err.stack)
+              await writer.write(
+                encoder.encode(`data: ${JSON.stringify({ mapsError: err.message })}\n\n`)
+              )
             }
 
             await saveRoute(env, routeId, {
@@ -676,9 +679,6 @@ export default {
 
       const data = await loadRoute(env, routeId)
       if (!data) {
-        if (data?.driveFileId) {
-          ctx.waitUntil(deleteMyMap(env, data.driveFileId))
-        }
         return jsonResponse({ error: "Percorso non trovato" }, 404, origin)
       }
 
