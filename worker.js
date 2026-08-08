@@ -121,7 +121,7 @@ async function fetchMonuments(env) {
   }
 
   const res = await withTimeout(
-    env.MONUMENTI.fetch(new Request("https://console.insidegubbio.com/v2/articles/elenco-monumenti")),
+    fetch("https://console.insidegubbio.com/v2/articles/elenco-monumenti"),
     MONUMENTS_FETCH_TIMEOUT,
     "Fetch monumenti"
   )
