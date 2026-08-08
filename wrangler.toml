@@ -7,10 +7,6 @@ compatibility_flags = ["nodejs_compat"]
 binding = "ROUTES_KV"
 id = "a6228dd3167d4d03a06fa42e41272964"
 
-[[services]]
-binding = "MONUMENTI"
-service = "console"
-
 [observability]
 enabled = false
 head_sampling_rate = 1
