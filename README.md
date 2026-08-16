@@ -9,12 +9,13 @@ client (framer)
     |
     v
 cloudflare worker  (questo repo)
-    |         |
-    v         v
-gemini api    api.insidegubbio.com/v1/articles/elenco-monumenti
+    |         |                              |
+    v         v                              v
+gemini api   console.insidegubbio.com   graphhopper.insidegubbio.com
+(pool)     /v2/articles/elenco-monumenti  (routing a piedi)
 ```
 
-il worker riceve il prompt dell'utente, recupera la lista aggiornata dei monumenti, costruisce un contesto compatto e chiama gemini in streaming, restituendo la risposta chunk per chunk via server-sent events.
+il worker riceve il prompt dell'utente, recupera la lista aggiornata dei monumenti, costruisce un contesto compatto e chiama gemini in streaming, restituendo la risposta chunk per chunk via server-sent events. al termine dello streaming, se gemini ha prodotto un elenco strutturato di poi, il worker calcola il percorso pedonale via graphhopper, genera un file gpx e lo salva su kv.
 
 ## endpoint
 
@@ -31,7 +32,17 @@ genera un itinerario in streaming.
 
 ogni chunk ha la forma:
 ```
-data: {"chunk": "testo..."}
+data: {"chunk": "testo accumulato finora..."}
+```
+
+i pensieri del modello (thinking) vengono inviati separatamente:
+```
+data: {"thinking": "testo del ragionamento..."}
+```
+
+quando il percorso gpx è pronto:
+```
+data: {"routeReady": true, "routeId": "abc123def456"}
 ```
 
 la sequenza termina con:
@@ -44,62 +55,74 @@ in caso di errore:
 data: {"error": "messaggio di errore"}
 ```
 
+### `GET /api/v1/route/:id`
+
+restituisce i metadati di un percorso salvato in formato json.
+
+```json
+{
+  "id": "abc123def456",
+  "title": "Percorso centro storico",
+  "description": "...",
+  "gpxUrl": "https://ikuvium.insidegubbio.com/api/v1/route/abc123def456.gpx",
+  "pois": [
+    {
+      "index": 1,
+      "name": "Cattedrale di Gubbio",
+      "link": "https://www.insidegubbio.com/...",
+      "pinUrl": "https://vassallo.insidegubbio.com/svg/pin/1.svg",
+      "lat": 43.3567,
+      "lon": 12.5779
+    }
+  ]
+}
+```
+
+### `GET /api/v1/route/:id.gpx`
+
+restituisce direttamente il file gpx del percorso, con waypoint numerati e traccia pedonale.
+
 ### `GET /api/v1/health`
 
-restituisce `{"status": "ok"}`. utile per verificare che il worker sia attivo.
-
-## origini autorizzate
-
-solo le seguenti origini possono chiamare `/api/v1/itinerary`:
-
-- `https://insidegubbio.com`
-- `https://www.insidegubbio.com`
-- sottodomini di `insidegubbio.framer.ai`
-
-richieste da altre origini ricevono un `403 origine non autorizzata`. richieste senza header `origin` (curl, script server-side) passano senza restrizioni.
+restituisce `{"status": "ok"}`, semplice uptime
 
 ## variabili d'ambiente (wrangler secrets)
 
 | variabile | descrizione |
 |---|---|
-| `GEMINI_API_KEY` | chiave api di google ai studio |
-| `GEMINI_MODEL` | modello da usare (default: `gemini-2.5-flash`) |
+| `GEMINI_API_KEYS` | chiavi api di google ai studio separate da virgola (con fallback automatico su quota esaurita) |
+| `GEMINI_API_KEY` | alternativa singola a `GEMINI_API_KEYS` |
+| `GEMINI_MODEL` | modello da usare (default: `gemini-3.5-flash-lite`) |
 | `SYSTEM_PROMPT` | prompt di sistema con il placeholder `{{MONUMENTS}}` |
 
 configurate via:
 ```bash
-wrangler secret put GEMINI_API_KEY
+wrangler secret put GEMINI_API_KEYS
 wrangler secret put GEMINI_MODEL
 wrangler secret put SYSTEM_PROMPT
 ```
 
-## kv binding (opzionale)
+se si fornisce `GEMINI_API_KEYS`, le chiavi vengono mescolate casualmente ad ogni richiesta e in caso di risposta `429` o `403` si passa automaticamente alla chiave successiva.
 
-il worker supporta un kv namespace chiamato `MONUMENTS_KV` per cachare la lista dei monumenti e ridurre le chiamate all'api esterna.
+## kv bindings
 
-- ttl in memoria: 5 minuti
-- ttl su kv: 10 minuti
+il worker usa due kv namespace:
 
-se il binding non e' configurato, i monumenti vengono recuperati dall'api a ogni richiesta fredda.
+| binding | descrizione | ttl |
+|---|---|---|
+| `MONUMENTS_KV` | cache della lista monumenti | 10 minuti |
+| `ROUTES_KV` | percorsi gpx generati | 90 giorni |
 
-## caching dei monumenti
+entrambi sono opzionali ma consigliati. senza `MONUMENTS_KV` i monumenti vengono recuperati dall'api a ogni richiesta fredda. 
+senza `ROUTES_KV` i percorsi non vengono salvati e l'endpoint `/api/v1/route/:id` non funziona.
 
-il worker usa una cache a tre livelli:
-
-1. memoria del worker (piu' veloce, resettata a ogni nuovo isolate)
-2. kv namespace (persiste tra isolate, ttl 10 min)
-3. fetch diretto all'api (fallback, timeout 5s)
-
-i monumenti non piu' esistenti, senza coordinate o non agibili vengono filtrati prima di essere passati a gemini. i percorsi di accesso non vengono inclusi nel contesto per ridurre i token inviati al modello.
-
-## timeout
+## tempi
 
 | operazione | timeout |
 |---|---|
 | fetch monumenti | 5 secondi |
+| fetch gpx via graphhopper | 20 secondi |
 | risposta gemini (streaming) | 55 secondi |
-
-nota: il piano gratuito di cloudflare workers ha un limite di wall-clock time di 30 secondi. per evitare risposte troncate si consiglia il piano paid ($5/mese).
 
 ## sviluppo locale
 
