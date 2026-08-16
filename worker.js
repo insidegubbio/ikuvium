@@ -49,6 +49,33 @@ function makeRouteId() {
   return crypto.randomUUID().replace(/-/g, "").slice(0, 12)
 }
 
+function parseApiKeys(env) {
+  const raw = env.GEMINI_API_KEYS || env.GEMINI_API_KEY || ""
+  return raw.split(",").map(k => k.trim()).filter(Boolean)
+}
+
+async function fetchGeminiWithFallback(url, options, keys) {
+  if (!keys.length) throw new Error("Nessuna chiave API Gemini configurata")
+
+  let lastErr
+  const pool = [...keys].sort(() => Math.random() - 0.5)
+
+  for (const key of pool) {
+    const urlWithKey = url.replace(/key=[^&]+/, `key=${key}`)
+    try {
+      const res = await fetch(urlWithKey, options)
+      if (res.status === 429 || res.status === 403) {
+        lastErr = new Error(`Quota esaurita su una chiave (status ${res.status})`)
+        continue
+      }
+      return res
+    } catch (err) {
+      lastErr = err
+    }
+  }
+  throw lastErr || new Error("Tutte le chiavi API hanno esaurito la quota")
+}
+
 function parseCoordinateFromVisitabilita(visitabilita) {
   if (!visitabilita) return null
   const match = visitabilita.match(/(4[0-9]\.[0-9]+)\s*,\s*(1[0-9]\.[0-9]+)/)
@@ -329,11 +356,11 @@ function extractJsonBlock(text) {
   }
 }
 
-async function streamGemini(env, apiKey, model, userPrompt, monuments, systemPromptTemplate, origin) {
+async function streamGemini(env, apiKeys, model, userPrompt, monuments, systemPromptTemplate, origin) {
   const monumentsContext = buildMonumentsContext(monuments)
   const systemInstruction = systemPromptTemplate.replace("{{MONUMENTS}}", monumentsContext)
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=PLACEHOLDER`
 
   const isGemini3 = /^gemini-3/.test(model)
   const thinkingConfig = isGemini3
@@ -341,19 +368,23 @@ async function streamGemini(env, apiKey, model, userPrompt, monuments, systemPro
     : { includeThoughts: true, thinkingBudget: -1 }
 
   const geminiRes = await withTimeout(
-    fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-        systemInstruction: { parts: [{ text: systemInstruction }] },
-        generationConfig: {
-          temperature: 0.4,
-          maxOutputTokens: MAX_OUTPUT_TOKENS,
-          thinkingConfig,
-        },
-      }),
-    }),
+    fetchGeminiWithFallback(
+      url,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+          systemInstruction: { parts: [{ text: systemInstruction }] },
+          generationConfig: {
+            temperature: 0.4,
+            maxOutputTokens: MAX_OUTPUT_TOKENS,
+            thinkingConfig,
+          },
+        }),
+      },
+      apiKeys
+    ),
     GEMINI_TIMEOUT,
     "Gemini stream"
   )
@@ -556,9 +587,9 @@ export default {
         return jsonResponse({ error: "Origine non autorizzata" }, 403, origin)
       }
 
-      const apiKey = env.GEMINI_API_KEY
+      const apiKeys = parseApiKeys(env)
       const systemPromptTemplate = env.SYSTEM_PROMPT
-      if (!apiKey || !systemPromptTemplate) {
+      if (!apiKeys.length || !systemPromptTemplate) {
         return jsonResponse({ error: "Configurazione server mancante" }, 500, origin)
       }
 
@@ -595,7 +626,7 @@ export default {
       const model = env.GEMINI_MODEL || DEFAULT_MODEL
 
       try {
-        return await streamGemini(env, apiKey, model, prompt, monuments, systemPromptTemplate, origin)
+        return await streamGemini(env, apiKeys, model, prompt, monuments, systemPromptTemplate, origin)
       } catch (err) {
         return jsonResponse({ error: err.message || "Errore Gemini" }, 502, origin)
       }
